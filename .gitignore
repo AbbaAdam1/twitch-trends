@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets and local config
+.env
+.env.*
+*.pem
+.aws/
+
+# Infrastructure-as-code build output
+cdk.out/
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Local data and outputs
+data/
+output/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
