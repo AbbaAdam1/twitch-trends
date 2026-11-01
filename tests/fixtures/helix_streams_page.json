@@ -1,0 +1,64 @@
+{
+  "data": [
+    {
+      "id": "5001",
+      "user_id": "1001",
+      "user_login": "example_streamer_1",
+      "user_name": "Example_Streamer_1",
+      "game_id": "29595",
+      "game_name": "Dota 2",
+      "type": "live",
+      "title": "Example stream title 1",
+      "viewer_count": 50537,
+      "started_at": "2026-11-01T12:30:12Z",
+      "language": "ru",
+      "thumbnail_url": "https://static-cdn.example/1-{width}x{height}.jpg",
+      "tag_ids": [],
+      "tags": [
+        "English"
+      ],
+      "is_mature": false
+    },
+    {
+      "id": "5002",
+      "user_id": "1002",
+      "user_login": "example_streamer_2",
+      "user_name": "Example_Streamer_2",
+      "game_id": "29595",
+      "game_name": "Dota 2",
+      "type": "live",
+      "title": "Example stream title 2",
+      "viewer_count": 47053,
+      "started_at": "2026-11-01T12:27:57Z",
+      "language": "ru",
+      "thumbnail_url": "https://static-cdn.example/2-{width}x{height}.jpg",
+      "tag_ids": [],
+      "tags": [
+        "English"
+      ],
+      "is_mature": false
+    },
+    {
+      "id": "5003",
+      "user_id": "1003",
+      "user_login": "example_streamer_3",
+      "user_name": "Example_Streamer_3",
+      "game_id": "509658",
+      "game_name": "Just Chatting",
+      "type": "live",
+      "title": "Example stream title 3",
+      "viewer_count": 25624,
+      "started_at": "2026-11-01T10:39:49Z",
+      "language": "de",
+      "thumbnail_url": "https://static-cdn.example/3-{width}x{height}.jpg",
+      "tag_ids": [],
+      "tags": [
+        "English"
+      ],
+      "is_mature": false
+    }
+  ],
+  "pagination": {
+    "cursor": "example-cursor"
+  }
+}
