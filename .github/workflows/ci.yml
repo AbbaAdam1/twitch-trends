@@ -17,3 +17,4 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: pytest
+      - run: npx --yes aws-cdk@2 synth -c alert_email=ci@example.com
