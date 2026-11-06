@@ -10,7 +10,17 @@ requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["aws-cdk-lib>=2.170", "boto3>=1.34", "constructs>=10", "pytest>=8", "ruff>=0.6"]
+# pyarrow comes from AWS's pandas layer in Lambda, so it's only needed here for local runs and
+# tests. tzdata gives Windows the time zone data that Linux (and Lambda) already has.
+dev = [
+    "aws-cdk-lib>=2.170",
+    "boto3>=1.34",
+    "constructs>=10",
+    "pyarrow>=18",
+    "pytest>=8",
+    "ruff>=0.6",
+    "tzdata",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

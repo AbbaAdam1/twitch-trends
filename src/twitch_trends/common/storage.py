@@ -1,7 +1,7 @@
 """Where things live in the S3 bucket, and how the Lambda functions get their credentials."""
 
 import os
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from twitch_trends.common.twitch_client import TwitchClient
 
@@ -14,6 +14,17 @@ def igdb_games_key(now: datetime) -> str:
     """One file per day, so release dates and genres are kept as they were on that day.
     Release dates move often, and the analysis needs the history."""
     return f"ref/igdb/dt={now.astimezone(UTC):%Y-%m-%d}/games.json.gz"
+
+
+def raw_day_prefix(dt: date) -> str:
+    """The folder holding one day's raw snapshots."""
+    return f"raw/streams/dt={dt:%Y-%m-%d}/"
+
+
+def curated_key(table: str, dt: date) -> str:
+    """One file per table per day, always at the same name. Writing a day again replaces the
+    file instead of adding a second one, so re-running a day can't create duplicates."""
+    return f"curated/{table}/dt={dt:%Y-%m-%d}/part-0.parquet"
 
 
 def twitch_client_from_ssm(ssm) -> TwitchClient:

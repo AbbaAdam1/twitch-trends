@@ -5,7 +5,12 @@ from datetime import UTC, datetime
 import pytest
 from conftest import FakeS3, query_of
 
-from twitch_trends.collector.handler import METRIC_NAME, METRIC_NAMESPACE, run
+from twitch_trends.collector.handler import (
+    METRIC_NAME,
+    METRIC_NAMESPACE,
+    WATCHLIST_METRIC_NAME,
+    run,
+)
 from twitch_trends.common.storage import WATCHLIST_KEY
 from twitch_trends.common.twitch_client import TwitchAPIError, TwitchClient
 
@@ -61,15 +66,17 @@ def test_without_a_watchlist_it_still_collects_top_streams(fake_twitch):
 def test_with_a_watchlist_it_also_counts_those_games(fake_twitch):
     fake_twitch.queue_page([900])  # top streams
     fake_twitch.queue_page([3, 0])  # watchlist streams, tiny ones included
-    s3 = FakeS3({WATCHLIST_KEY: json.dumps(WATCHLIST).encode()})
+    s3, cloudwatch = FakeS3({WATCHLIST_KEY: json.dumps(WATCHLIST).encode()}), FakeCloudWatch()
 
-    summary = run_with(fake_twitch, s3, FakeCloudWatch())
+    summary = run_with(fake_twitch, s3, cloudwatch)
 
     watchlist = saved_snapshot(s3)["watchlist"]
     assert watchlist["generated_dt"] == "2026-11-02"
     assert watchlist["stream_count"] == 2
     assert query_of(fake_twitch.api_requests[1])["game_id"] == ["111", "222"]
     assert summary["watchlist_streams"] == 2
+    metrics = {m["MetricName"]: m["Value"] for m in cloudwatch.metrics[0]["MetricData"]}
+    assert metrics == {METRIC_NAME: 1, WATCHLIST_METRIC_NAME: 2}
 
 
 def test_empty_response_fails_and_saves_nothing(fake_twitch):

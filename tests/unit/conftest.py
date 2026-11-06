@@ -29,6 +29,15 @@ class FakeS3:
             raise self.exceptions.NoSuchKey(Key)
         return {"Body": io.BytesIO(self.objects[Key])}
 
+    def get_paginator(self, name: str):
+        assert name == "list_objects_v2"
+        return self
+
+    def paginate(self, Bucket: str, Prefix: str):  # noqa: N803
+        keys = sorted(key for key in self.objects if key.startswith(Prefix))
+        # Like S3, a listing with no matches has no "Contents" at all.
+        yield {"Contents": [{"Key": key} for key in keys]} if keys else {}
+
 
 class FakeTwitch:
     """Stands in for the network: serves queued responses and records each request."""

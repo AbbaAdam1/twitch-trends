@@ -21,6 +21,10 @@ from twitch_trends.common.storage import WATCHLIST_KEY
 SRC_DIR = Path(__file__).parent.parent / "src"
 CLIENT_ID_PARAM = "/twitch-trends/client-id"
 CLIENT_SECRET_PARAM = "/twitch-trends/client-secret"
+# AWS's free, public "AWS SDK for pandas" layer, which includes pyarrow for writing Parquet.
+# pyarrow is too big to bundle with the code comfortably. The version is pinned so a new
+# release can't change things without a deploy. Account 336392948345 belongs to AWS.
+PANDAS_LAYER = "arn:aws:lambda:{region}:336392948345:layer:AWSSDKPandas-Python312-Arm64:32"
 
 
 class PipelineStack(Stack):
@@ -155,6 +159,64 @@ class PipelineStack(Stack):
             targets=[targets.LambdaFunction(release_sync)],
         )
 
+        compactor = lambda_.Function(
+            self,
+            "Compactor",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            architecture=lambda_.Architecture.ARM_64,
+            handler="twitch_trends.compactor.handler.handler",
+            code=code,
+            layers=[
+                lambda_.LayerVersion.from_layer_version_arn(
+                    self, "PandasLayer", PANDAS_LAYER.format(region=self.region)
+                )
+            ],
+            # A day took about 70 seconds and 200 MB in testing. Lambda gives more CPU with
+            # more memory, and parsing JSON is CPU-bound, so the extra memory makes it faster.
+            # Once a day, it's still well inside the free allowance.
+            memory_size=1024,
+            timeout=Duration.minutes(10),
+            log_group=logs.LogGroup(
+                self,
+                "CompactorLogs",
+                retention=logs.RetentionDays.TWO_WEEKS,
+                removal_policy=RemovalPolicy.DESTROY,
+            ),
+            # Re-running a day replaces its files, so retrying a failure is safe.
+            retry_attempts=2,
+            environment={"BUCKET_NAME": bucket.bucket_name},
+        )
+        # It reads raw snapshots and writes only under curated/. It can't change raw data.
+        compactor.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:ListBucket"],
+                resources=[bucket.bucket_arn],
+                conditions={"StringLike": {"s3:prefix": "raw/streams/*"}},
+            )
+        )
+        compactor.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject"], resources=[bucket.arn_for_objects("raw/streams/*")]
+            )
+        )
+        bucket.grant_put(compactor, "curated/*")
+        compactor.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["cloudwatch:PutMetricData"],
+                resources=["*"],
+                conditions={"StringEquals": {"cloudwatch:namespace": METRIC_NAMESPACE}},
+            )
+        )
+
+        events.Rule(
+            self,
+            "CompactorSchedule",
+            # 00:30 UTC, compacting the day that just ended. The half hour leaves room for
+            # the day's last snapshot (taken just before midnight) to finish saving.
+            schedule=events.Schedule.cron(minute="30", hour="0"),
+            targets=[targets.LambdaFunction(compactor)],
+        )
+
         alerts = sns.Topic(self, "Alerts")
         alerts.add_subscription(subscriptions.EmailSubscription(alert_email))
         alert_action = cloudwatch_actions.SnsAction(alerts)
@@ -214,3 +276,16 @@ class PipelineStack(Stack):
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
         release_sync_failed.add_alarm_action(alert_action)
+
+        # Same rule as the release sync: three errors in a day means every attempt failed.
+        compaction_failed = cloudwatch.Alarm(
+            self,
+            "CompactionFailed",
+            alarm_description="Daily compaction failed on every attempt",
+            metric=compactor.metric_errors(period=Duration.days(1), statistic="Sum"),
+            threshold=3,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        compaction_failed.add_alarm_action(alert_action)
