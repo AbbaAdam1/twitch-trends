@@ -31,13 +31,26 @@ def test_collects_all_pages_when_data_runs_out(fake_twitch):
 def test_stops_at_viewer_floor_and_drops_streams_below_it(fake_twitch):
     fake_twitch.queue_page([900, 60], cursor="abc")
     fake_twitch.queue_page([55, 40], cursor="def")
-    fake_twitch.queue_page([30])
+    fake_twitch.queue_page([30, 20], cursor="ghi")
+    fake_twitch.queue_page([10])
 
     snapshot = collect(fake_twitch, min_viewers=50)
 
     assert [s["viewer_count"] for s in snapshot["streams"]] == [900, 60, 55]
-    assert snapshot["pages_fetched"] == 2
+    assert snapshot["pages_fetched"] == 3
     assert snapshot["truncated"] is False
+
+
+def test_one_small_stream_out_of_order_does_not_stop_collection(fake_twitch):
+    # Seen live: Twitch's sort is approximate, and a page of large streams ended with one
+    # under the floor. Stopping there kept 99 streams when thousands were live.
+    fake_twitch.queue_page([900, 800, 3], cursor="abc")
+    fake_twitch.queue_page([700, 600])
+
+    snapshot = collect(fake_twitch, min_viewers=50)
+
+    assert [s["viewer_count"] for s in snapshot["streams"]] == [900, 800, 700, 600]
+    assert snapshot["pages_fetched"] == 2
 
 
 def test_marks_truncated_when_page_cap_hit_with_more_available(fake_twitch):

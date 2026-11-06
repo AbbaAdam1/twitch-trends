@@ -58,9 +58,11 @@ def collect_top_streams(
                 # setdefault only adds the stream if its ID isn't already in the dict.
                 streams.setdefault(stream["id"], stream)
 
-        # Stop if the page was empty, or its last stream is below the floor. Results are
-        # sorted by viewers, so every later page would be below the floor too.
-        if not rows or rows[-1]["viewer_count"] < min_viewers:
+        # Stop if the page was empty, or every stream on it is below the floor. Results are
+        # sorted by viewers, so later pages would be below the floor too. The sort is only
+        # approximate, though: a page of large streams can end with one tiny stream, so a
+        # single low stream isn't enough reason to stop.
+        if not rows or all(stream["viewer_count"] < min_viewers for stream in rows):
             break
         # Stop at the page limit. It only counts as truncated if Twitch had more to give,
         # which a cursor tells us. bool() turns the cursor (or None) into True or False.
