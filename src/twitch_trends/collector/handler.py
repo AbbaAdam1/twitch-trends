@@ -3,13 +3,15 @@
 # AWS calls handler() every 10 minutes. It reuses the same logic as the local script, so
 # only the storage differs: S3 here, the data/ folder there.
 
+import json
 import logging
 import os
 from datetime import UTC, datetime
 
 import boto3
 
-from twitch_trends.collector.snapshot import collect_top_streams, encode_snapshot, snapshot_key
+from twitch_trends.collector.snapshot import collect_snapshot, encode_snapshot, snapshot_key
+from twitch_trends.common.storage import WATCHLIST_KEY, twitch_client_from_ssm
 from twitch_trends.common.twitch_client import TwitchClient
 
 METRIC_NAMESPACE = "TwitchTrends"
@@ -26,18 +28,25 @@ _twitch_client: TwitchClient | None = None
 def _get_twitch_client() -> TwitchClient:
     global _twitch_client
     if _twitch_client is None:
-        ssm = boto3.client("ssm")
-        client_id = ssm.get_parameter(Name=os.environ["CLIENT_ID_PARAM"])["Parameter"]["Value"]
-        client_secret = ssm.get_parameter(
-            Name=os.environ["CLIENT_SECRET_PARAM"], WithDecryption=True
-        )["Parameter"]["Value"]
-        _twitch_client = TwitchClient(client_id, client_secret)
+        _twitch_client = twitch_client_from_ssm(boto3.client("ssm"))
     return _twitch_client
+
+
+def load_watchlist(s3, bucket: str) -> dict | None:
+    """Read the watchlist from S3, or return None if the release sync hasn't written one yet."""
+    try:
+        response = s3.get_object(Bucket=bucket, Key=WATCHLIST_KEY)
+    except s3.exceptions.NoSuchKey:
+        # Only expected before the first release sync. Top streams are still worth collecting.
+        logger.warning("No watchlist at %s; collecting top streams only", WATCHLIST_KEY)
+        return None
+    with response["Body"] as body:
+        return json.loads(body.read())
 
 
 def run(client: TwitchClient, s3, cloudwatch, bucket: str, now: datetime) -> dict:
     """Do one collection. Takes its dependencies as arguments so tests can pass in fakes."""
-    snapshot = collect_top_streams(client, now)
+    snapshot = collect_snapshot(client, now, load_watchlist(s3, bucket))
 
     # Twitch always has streams live, so an empty result means something is wrong. Failing
     # here counts as a Lambda error, and it keeps a useless file out of the dataset.
@@ -61,11 +70,15 @@ def run(client: TwitchClient, s3, cloudwatch, bucket: str, now: datetime) -> dic
         ],
     )
 
+    watchlist = snapshot["watchlist"]
     summary = {
         "key": key,
         "stream_count": snapshot["stream_count"],
         "pages_fetched": snapshot["pages_fetched"],
         "truncated": snapshot["truncated"],
+        "watchlist_streams": watchlist["stream_count"] if watchlist else None,
+        "watchlist_pages": watchlist["pages_fetched"] if watchlist else None,
+        "watchlist_truncated_chunks": watchlist["truncated_chunks"] if watchlist else None,
     }
     logger.info("Saved snapshot: %s", summary)
     return summary

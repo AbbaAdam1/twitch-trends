@@ -15,7 +15,7 @@ from botocore.exceptions import BotoCoreError, ClientError  # errors boto3 can r
 from twitch_trends.collector.snapshot import (
     DEFAULT_MAX_PAGES,
     DEFAULT_MIN_VIEWERS,
-    collect_top_streams,
+    collect_snapshot,
     snapshot_key,
     write_local,
 )
@@ -58,10 +58,12 @@ def main() -> int:
         # Step 3: record the current time in UTC, then collect the live streams.
         # UTC keeps dates consistent regardless of where the code runs. Your
         # laptop and AWS are in different time zones, but both will agree on UTC.
+        # Locally there's no watchlist, so this collects the top streams only.
         now = datetime.now(UTC)
-        snapshot = collect_top_streams(
+        snapshot = collect_snapshot(
             TwitchClient(client_id, client_secret),
             now,
+            watchlist=None,
             min_viewers=args.min_viewers,
             max_pages=args.max_pages,
         )
