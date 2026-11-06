@@ -16,6 +16,7 @@ from twitch_trends.common.twitch_client import TwitchClient
 
 METRIC_NAMESPACE = "TwitchTrends"
 METRIC_NAME = "StreamsCollected"
+WATCHLIST_METRIC_NAME = "WatchlistStreamsCollected"
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -61,16 +62,21 @@ def run(client: TwitchClient, s3, cloudwatch, bucket: str, now: datetime) -> dic
         ContentType="application/gzip",
     )
 
-    # The "collection stopped" alarm watches this number. It's only sent after a successful
-    # save, so any failure along the way shows up as missing data.
-    cloudwatch.put_metric_data(
-        Namespace=METRIC_NAMESPACE,
-        MetricData=[
-            {"MetricName": METRIC_NAME, "Value": snapshot["stream_count"], "Unit": "Count"}
-        ],
-    )
-
+    # The "collection stopped" alarm watches the first number. It's only sent after a successful
+    # save, so any failure along the way shows up as missing data. The watchlist count is for
+    # charts: a sudden drop means new games are going uncounted.
     watchlist = snapshot["watchlist"]
+    metrics = [{"MetricName": METRIC_NAME, "Value": snapshot["stream_count"], "Unit": "Count"}]
+    if watchlist:
+        metrics.append(
+            {
+                "MetricName": WATCHLIST_METRIC_NAME,
+                "Value": watchlist["stream_count"],
+                "Unit": "Count",
+            }
+        )
+    cloudwatch.put_metric_data(Namespace=METRIC_NAMESPACE, MetricData=metrics)
+
     summary = {
         "key": key,
         "stream_count": snapshot["stream_count"],

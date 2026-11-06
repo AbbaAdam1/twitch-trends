@@ -54,14 +54,14 @@ def test_functions_are_small_and_outside_any_vpc(template):
     functions = template.find_resources(
         "AWS::Lambda::Function", {"Properties": {"Runtime": "python3.12"}}
     )
-    handlers = sorted(f["Properties"]["Handler"] for f in functions.values())
-    assert handlers == [
-        "twitch_trends.collector.handler.handler",
-        "twitch_trends.release_sync.handler.handler",
-    ]
+    memory = {f["Properties"]["Handler"]: f["Properties"]["MemorySize"] for f in functions.values()}
+    assert memory == {
+        "twitch_trends.collector.handler.handler": 256,
+        "twitch_trends.release_sync.handler.handler": 256,
+        "twitch_trends.compactor.handler.handler": 1024,  # once a day; more memory, more CPU
+    }
     for function in functions.values():
         properties = function["Properties"]
-        assert properties["MemorySize"] == 256
         assert properties["Architectures"] == ["arm64"]
         assert "VpcConfig" not in properties  # a VPC would need a costly NAT gateway
 
@@ -106,6 +106,35 @@ def test_release_sync_can_only_write_reference_files(template):
     assert "s3:GetObject" not in policy
     assert "s3:DeleteObject" not in policy
     assert ":parameter/twitch-trends/client-secret" in policy
+
+
+def test_compactor_reads_raw_data_and_writes_only_curated_files(template):
+    policy = role_policy(template, "Compactor")
+    assert '"s3:prefix": "raw/streams/*"' in policy
+    assert "/raw/streams/*" in policy
+    assert "/curated/*" in policy
+    assert "s3:DeleteObject" not in policy
+    assert "s3:*" not in policy
+    assert "ssm:" not in policy  # it never talks to Twitch
+    # Writing to raw/ would let a bug damage data that can't be collected again.
+    put = [
+        s
+        for s in json.loads(policy)["Properties"]["PolicyDocument"]["Statement"]
+        if "s3:PutObject" in s["Action"]
+    ]
+    assert "raw/" not in json.dumps(put)
+
+
+def test_compactor_runs_daily_after_midnight_with_the_pandas_layer(template):
+    template.has_resource_properties(
+        "AWS::Events::Rule", {"ScheduleExpression": "cron(30 0 * * ? *)", "State": "ENABLED"}
+    )
+    compactor = template.find_resources(
+        "AWS::Lambda::Function",
+        {"Properties": {"Handler": "twitch_trends.compactor.handler.handler"}},
+    )
+    # The region is filled in at deploy time, so the ARN is joined from parts in the template.
+    assert ":336392948345:layer:AWSSDKPandas-Python312-Arm64:32" in json.dumps(compactor)
 
 
 def test_release_sync_alerts_only_when_every_attempt_fails(template):
