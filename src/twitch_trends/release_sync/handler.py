@@ -93,10 +93,13 @@ def run(
         raise RuntimeError("No releases matched a Twitch category")
 
     games_key = igdb_games_key(now)
+    # One game per line ("JSON Lines"), which is the layout Athena reads. A single JSON list
+    # would look to Athena like one enormous row.
+    lines = "\n".join(json.dumps(game, separators=(",", ":")) for game in games)
     s3.put_object(
         Bucket=bucket,
         Key=games_key,
-        Body=gzip.compress(json.dumps(games, separators=(",", ":")).encode()),
+        Body=gzip.compress(lines.encode()),
         ContentType="application/gzip",
     )
     watchlist = {
