@@ -1,4 +1,5 @@
 import copy
+import io
 import json
 import urllib.parse
 from pathlib import Path
@@ -6,6 +7,27 @@ from pathlib import Path
 import pytest
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
+
+
+class FakeS3:
+    """Stands in for an S3 client: keeps objects in memory and records each upload."""
+
+    class exceptions:  # mirrors boto3's client.exceptions.NoSuchKey
+        class NoSuchKey(Exception):
+            pass
+
+    def __init__(self, objects: dict[str, bytes] | None = None) -> None:
+        self.objects = dict(objects or {})
+        self.puts: list[dict] = []
+
+    def put_object(self, **kwargs) -> None:
+        self.puts.append(kwargs)
+        self.objects[kwargs["Key"]] = kwargs["Body"]
+
+    def get_object(self, Bucket: str, Key: str) -> dict:  # noqa: N803, matches boto3's names
+        if Key not in self.objects:
+            raise self.exceptions.NoSuchKey(Key)
+        return {"Body": io.BytesIO(self.objects[Key])}
 
 
 class FakeTwitch:

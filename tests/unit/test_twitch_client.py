@@ -31,6 +31,37 @@ def test_follows_cursor_until_pages_run_out(fake_twitch):
     assert query_of(fake_twitch.api_requests[1])["after"] == ["abc"]
 
 
+def test_filters_streams_by_game_ids(fake_twitch):
+    fake_twitch.queue_page([5])
+
+    list(make_client(fake_twitch).iter_stream_pages(game_ids=["111", "222"]))
+
+    assert query_of(fake_twitch.api_requests[0])["game_id"] == ["111", "222"]
+
+
+def test_looks_up_twitch_games_in_batches_of_100(fake_twitch):
+    fake_twitch.api_responses.append((200, b'{"data":[{"id":"1","igdb_id":"5"}]}'))
+    fake_twitch.api_responses.append((200, b'{"data":[]}'))
+
+    games = make_client(fake_twitch).get_games_by_igdb_ids(list(range(150)))
+
+    assert games == [{"id": "1", "igdb_id": "5"}]
+    sizes = [len(query_of(r)["igdb_id"]) for r in fake_twitch.api_requests]
+    assert sizes == [100, 50]
+
+
+def test_igdb_query_is_posted_with_the_same_token(fake_twitch):
+    fake_twitch.api_responses.append((200, b'[{"id": 1}]'))
+
+    result = make_client(fake_twitch).igdb("games", "fields name; limit 1;")
+
+    request = fake_twitch.api_requests[0]
+    assert result == [{"id": 1}]
+    assert request.get_method() == "POST"
+    assert request.data == b"fields name; limit 1;"
+    assert request.get_header("Authorization") == "Bearer token-1"
+
+
 def test_refreshes_token_once_on_401(fake_twitch):
     fake_twitch.api_responses.append((401, b'{"message":"Invalid token"}'))
     fake_twitch.queue_page([500])

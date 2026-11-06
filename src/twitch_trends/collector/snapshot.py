@@ -11,9 +11,26 @@ from pathlib import Path
 from twitch_trends.common.twitch_client import TwitchClient
 
 # Stored in every file. If the format ever changes, later code can tell old files from new.
-SCHEMA_VERSION = 1
+# Version 2 added the "watchlist" section.
+SCHEMA_VERSION = 2
 DEFAULT_MIN_VIEWERS = 50  # ignore streams smaller than this
 DEFAULT_MAX_PAGES = 20  # read at most this many pages (100 streams each) per run
+# Per group of 100 watchlist games. A big launch can fill 20+ pages on its own, and launches are
+# what the project measures, so the cap is generous. It exists only to stop a runaway loop.
+DEFAULT_MAX_PAGES_PER_CHUNK = 50
+GAME_IDS_PER_REQUEST = 100  # Twitch's limit on game IDs in one request
+
+# Watchlist streams keep only the fields the analysis needs. There are thousands of them, and
+# titles, tags and thumbnail links would roughly quintuple the storage.
+WATCHLIST_FIELDS = (
+    "id",
+    "user_id",
+    "game_id",
+    "game_name",
+    "viewer_count",
+    "started_at",
+    "language",
+)
 
 
 def collect_top_streams(
@@ -61,6 +78,67 @@ def collect_top_streams(
         "stream_count": len(streams),
         "streams": list(streams.values()),
     }
+
+
+def collect_watchlist_streams(
+    client: TwitchClient,
+    game_ids: list[str],
+    max_pages_per_chunk: int = DEFAULT_MAX_PAGES_PER_CHUNK,
+) -> dict:
+    """Collect every live stream for the watchlist games, with no viewer floor.
+
+    The top-streams list misses small games entirely, and new games often start small. Asking
+    for them by ID gets a full count, which is what measuring a launch needs.
+    """
+    streams: dict[str, dict] = {}
+    pages_fetched = 0
+    truncated_chunks = 0
+
+    for start in range(0, len(game_ids), GAME_IDS_PER_REQUEST):
+        chunk = game_ids[start : start + GAME_IDS_PER_REQUEST]
+        for page_number, page in enumerate(client.iter_stream_pages(game_ids=chunk), start=1):
+            pages_fetched += 1
+            rows = page.get("data", [])
+            for stream in rows:
+                streams.setdefault(
+                    stream["id"], {field: stream.get(field) for field in WATCHLIST_FIELDS}
+                )
+            if not rows:
+                break
+            # Results are sorted by viewers, so a capped chunk only loses its smallest streams.
+            # Counting how often it happens shows whether the cap needs raising.
+            if page_number >= max_pages_per_chunk:
+                if page.get("pagination", {}).get("cursor"):
+                    truncated_chunks += 1
+                break
+
+    return {
+        "game_count": len(game_ids),
+        "pages_fetched": pages_fetched,
+        "truncated_chunks": truncated_chunks,
+        "stream_count": len(streams),
+        "streams": list(streams.values()),
+    }
+
+
+def collect_snapshot(
+    client: TwitchClient,
+    now: datetime,
+    watchlist: dict | None,
+    min_viewers: int = DEFAULT_MIN_VIEWERS,
+    max_pages: int = DEFAULT_MAX_PAGES,
+) -> dict:
+    """Collect the top streams, plus every stream for the watchlist games when there is one."""
+    snapshot = collect_top_streams(client, now, min_viewers=min_viewers, max_pages=max_pages)
+    if watchlist is None:
+        snapshot["watchlist"] = None
+    else:
+        snapshot["watchlist"] = {
+            # Which day's release list was used, so the analysis can join to it later.
+            "generated_dt": watchlist["generated_dt"],
+            **collect_watchlist_streams(client, watchlist["game_ids"]),
+        }
+    return snapshot
 
 
 def snapshot_key(now: datetime) -> str:

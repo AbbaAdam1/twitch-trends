@@ -16,6 +16,7 @@ from aws_cdk import aws_sns_subscriptions as subscriptions
 from constructs import Construct
 
 from twitch_trends.collector.handler import METRIC_NAME, METRIC_NAMESPACE
+from twitch_trends.common.storage import WATCHLIST_KEY
 
 SRC_DIR = Path(__file__).parent.parent / "src"
 CLIENT_ID_PARAM = "/twitch-trends/client-id"
@@ -47,15 +48,29 @@ class PipelineStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
+        # Both functions ship the same package and differ only in which handler AWS calls.
+        code = lambda_.Code.from_asset(str(SRC_DIR), exclude=["*.egg-info", "__pycache__"])
+        ssm_param_arns = [
+            self.format_arn(
+                service="ssm",
+                resource="parameter",
+                resource_name=name.lstrip("/"),
+                arn_format=ArnFormat.SLASH_RESOURCE_NAME,
+            )
+            for name in (CLIENT_ID_PARAM, CLIENT_SECRET_PARAM)
+        ]
+
         collector = lambda_.Function(
             self,
             "Collector",
             runtime=lambda_.Runtime.PYTHON_3_12,
             architecture=lambda_.Architecture.ARM_64,  # cheaper per second than x86
             handler="twitch_trends.collector.handler.handler",
-            code=lambda_.Code.from_asset(str(SRC_DIR), exclude=["*.egg-info", "__pycache__"]),
+            code=code,
             memory_size=256,
-            timeout=Duration.minutes(2),
+            # A run with the watchlist took about 40 seconds in testing. The extra room covers a
+            # slow day at Twitch without letting a stuck run overlap the next one.
+            timeout=Duration.minutes(5),
             log_group=log_group,
             # The next run starts in 10 minutes anyway, so Lambda's automatic retries of a
             # failed run would only add near-duplicate snapshots.
@@ -67,22 +82,27 @@ class PipelineStack(Stack):
             },
         )
 
-        # Least privilege: the collector can only add files under raw/streams/, read its two
-        # parameters, and publish its own metric. It can't read or delete any data.
+        # Least privilege: the collector can only add files under raw/streams/, read the
+        # watchlist and its two parameters, and publish its own metric. It can't read any
+        # collected data or delete anything.
         bucket.grant_put(collector, "raw/streams/*")
         collector.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["ssm:GetParameter"],
-                resources=[
-                    self.format_arn(
-                        service="ssm",
-                        resource="parameter",
-                        resource_name=name.lstrip("/"),
-                        arn_format=ArnFormat.SLASH_RESOURCE_NAME,
-                    )
-                    for name in (CLIENT_ID_PARAM, CLIENT_SECRET_PARAM)
-                ],
+                actions=["s3:GetObject"], resources=[bucket.arn_for_objects(WATCHLIST_KEY)]
             )
+        )
+        # Without list permission, S3 reports a missing file as "access denied" instead of "no
+        # such key", and the collector couldn't tell "no watchlist yet" from a real problem.
+        # The condition limits listing to that one file name.
+        collector.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:ListBucket"],
+                resources=[bucket.bucket_arn],
+                conditions={"StringEquals": {"s3:prefix": WATCHLIST_KEY}},
+            )
+        )
+        collector.add_to_role_policy(
+            iam.PolicyStatement(actions=["ssm:GetParameter"], resources=ssm_param_arns)
         )
         collector.add_to_role_policy(
             iam.PolicyStatement(
@@ -97,6 +117,42 @@ class PipelineStack(Stack):
             "CollectorSchedule",
             schedule=events.Schedule.rate(Duration.minutes(10)),
             targets=[targets.LambdaFunction(collector, retry_attempts=0)],
+        )
+
+        release_sync = lambda_.Function(
+            self,
+            "ReleaseSync",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            architecture=lambda_.Architecture.ARM_64,
+            handler="twitch_trends.release_sync.handler.handler",
+            code=code,
+            memory_size=256,
+            timeout=Duration.minutes(5),
+            log_group=logs.LogGroup(
+                self,
+                "ReleaseSyncLogs",
+                retention=logs.RetentionDays.TWO_WEEKS,
+                removal_policy=RemovalPolicy.DESTROY,
+            ),
+            # Unlike the collector, this runs once a day, so retrying a failure is worth it.
+            # Re-running a day just overwrites that day's files.
+            retry_attempts=2,
+            environment={
+                "BUCKET_NAME": bucket.bucket_name,
+                "CLIENT_ID_PARAM": CLIENT_ID_PARAM,
+                "CLIENT_SECRET_PARAM": CLIENT_SECRET_PARAM,
+            },
+        )
+        bucket.grant_put(release_sync, "ref/*")
+        release_sync.add_to_role_policy(
+            iam.PolicyStatement(actions=["ssm:GetParameter"], resources=ssm_param_arns)
+        )
+
+        events.Rule(
+            self,
+            "ReleaseSyncSchedule",
+            schedule=events.Schedule.cron(minute="0", hour="6"),  # 06:00 UTC daily
+            targets=[targets.LambdaFunction(release_sync)],
         )
 
         alerts = sns.Topic(self, "Alerts")
@@ -144,3 +200,17 @@ class PipelineStack(Stack):
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
         repeated_errors.add_alarm_action(alert_action)
+
+        # The first try plus two retries means three errors in a day only when every attempt
+        # failed. Until it's fixed, the collector keeps using the last good watchlist.
+        release_sync_failed = cloudwatch.Alarm(
+            self,
+            "ReleaseSyncFailed",
+            alarm_description="Daily release sync failed on every attempt",
+            metric=release_sync.metric_errors(period=Duration.days(1), statistic="Sum"),
+            threshold=3,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        release_sync_failed.add_alarm_action(alert_action)

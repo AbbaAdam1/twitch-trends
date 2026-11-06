@@ -44,15 +44,26 @@ def test_collector_runs_every_10_minutes(template):
     )
 
 
-def test_collector_is_small_and_outside_any_vpc(template):
+def test_release_sync_runs_daily(template):
+    template.has_resource_properties(
+        "AWS::Events::Rule", {"ScheduleExpression": "cron(0 6 * * ? *)", "State": "ENABLED"}
+    )
+
+
+def test_functions_are_small_and_outside_any_vpc(template):
     functions = template.find_resources(
         "AWS::Lambda::Function", {"Properties": {"Runtime": "python3.12"}}
     )
-    assert len(functions) == 1
-    properties = next(iter(functions.values()))["Properties"]
-    assert properties["MemorySize"] == 256
-    assert properties["Architectures"] == ["arm64"]
-    assert "VpcConfig" not in properties  # a VPC would need a costly NAT gateway for internet
+    handlers = sorted(f["Properties"]["Handler"] for f in functions.values())
+    assert handlers == [
+        "twitch_trends.collector.handler.handler",
+        "twitch_trends.release_sync.handler.handler",
+    ]
+    for function in functions.values():
+        properties = function["Properties"]
+        assert properties["MemorySize"] == 256
+        assert properties["Architectures"] == ["arm64"]
+        assert "VpcConfig" not in properties  # a VPC would need a costly NAT gateway
 
 
 def test_no_expensive_resources(template):
@@ -60,18 +71,54 @@ def test_no_expensive_resources(template):
         template.resource_count_is(resource_type, 0)
 
 
+def role_policy(template, function_id: str) -> str:
+    """The permissions of one function's role, as JSON text."""
+    policies = template.find_resources("AWS::IAM::Policy")
+    matches = [
+        policy
+        for policy in policies.values()
+        if policy["Properties"]["PolicyName"].startswith(f"{function_id}ServiceRoleDefaultPolicy")
+    ]
+    assert len(matches) == 1
+    return json.dumps(matches[0])
+
+
 def test_collector_permissions_are_narrow(template):
-    policies = json.dumps(template.find_resources("AWS::IAM::Policy"))
-    # It may write snapshots but has no way to read or delete stored data.
-    assert "raw/streams/*" in policies
-    assert "s3:GetObject" not in policies
-    assert "s3:DeleteObject" not in policies
-    assert "s3:*" not in policies
+    policy = role_policy(template, "Collector")
+    # It may add snapshots and read the watchlist, but can't read collected data or delete.
+    assert "/raw/streams/*" in policy
+    assert '"/ref/watchlist.json"' in policy
+    assert "s3:GetObject*" not in policy  # the broad form that grant_read would add
+    assert "s3:DeleteObject" not in policy
+    assert "s3:*" not in policy
+    assert '"s3:prefix": "ref/watchlist.json"' in policy  # listing limited to one file name
     # The only wildcard resource is the metric action, limited to one namespace.
-    assert "cloudwatch:namespace" in policies
+    assert "cloudwatch:namespace" in policy
     # Exactly the two Twitch parameters, not every parameter in the account.
-    assert ":parameter/twitch-trends/client-id" in policies
-    assert ":parameter/twitch-trends/client-secret" in policies
+    assert ":parameter/twitch-trends/client-id" in policy
+    assert ":parameter/twitch-trends/client-secret" in policy
+
+
+def test_release_sync_can_only_write_reference_files(template):
+    policy = role_policy(template, "ReleaseSync")
+    assert "/ref/*" in policy
+    assert "raw/streams" not in policy
+    assert "s3:GetObject" not in policy
+    assert "s3:DeleteObject" not in policy
+    assert ":parameter/twitch-trends/client-secret" in policy
+
+
+def test_release_sync_alerts_only_when_every_attempt_fails(template):
+    template.has_resource_properties("AWS::Lambda::EventInvokeConfig", {"MaximumRetryAttempts": 2})
+    template.has_resource_properties(
+        "AWS::CloudWatch::Alarm",
+        {
+            "MetricName": "Errors",
+            "Period": 86400,
+            "Threshold": 3,
+            "AlarmActions": Match.any_value(),
+        },
+    )
 
 
 def test_gaps_in_collection_are_filled_with_zero_so_the_alarm_fires(template):
