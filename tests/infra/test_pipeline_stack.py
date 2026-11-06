@@ -74,12 +74,30 @@ def test_collector_permissions_are_narrow(template):
     assert ":parameter/twitch-trends/client-secret" in policies
 
 
-def test_missing_data_triggers_the_collection_alarm(template):
+def test_gaps_in_collection_are_filled_with_zero_so_the_alarm_fires(template):
     template.has_resource_properties(
         "AWS::CloudWatch::Alarm",
         {
-            "MetricName": "StreamsCollected",
-            "TreatMissingData": "breaching",
+            "Metrics": Match.array_with(
+                [
+                    Match.object_like({"Expression": "FILL(snapshots, 0)"}),
+                    Match.object_like(
+                        {
+                            "Id": "snapshots",
+                            "MetricStat": Match.object_like(
+                                {
+                                    "Metric": Match.object_like({"MetricName": "StreamsCollected"}),
+                                    "Period": 600,
+                                    "Stat": "SampleCount",
+                                }
+                            ),
+                        }
+                    ),
+                ]
+            ),
+            "EvaluationPeriods": 3,
+            "DatapointsToAlarm": 3,
+            "ComparisonOperator": "LessThanThreshold",
             "AlarmActions": Match.any_value(),
         },
     )
