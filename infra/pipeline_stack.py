@@ -103,20 +103,30 @@ class PipelineStack(Stack):
         alerts.add_subscription(subscriptions.EmailSubscription(alert_email))
         alert_action = cloudwatch_actions.SnsAction(alerts)
 
-        # Fires if no snapshot was saved for 30 minutes. Missing data counts as breaching,
-        # because silence is exactly what a stopped collector looks like.
+        # Fires when three 10-minute blocks in a row have no saved snapshot. A stopped collector
+        # sends no data at all, and CloudWatch can keep judging an older real data point instead
+        # of treating the gap as missing. A live test showed that left the alarm OK for over
+        # 80 minutes. FILL turns each empty block into an explicit 0, so the gap can't hide.
         collection_stopped = cloudwatch.Alarm(
             self,
             "CollectionStopped",
-            alarm_description="No Twitch snapshots saved in the last 30 minutes",
-            metric=cloudwatch.Metric(
-                namespace=METRIC_NAMESPACE,
-                metric_name=METRIC_NAME,
-                statistic="SampleCount",
-                period=Duration.minutes(30),
+            alarm_description="No Twitch snapshots saved for 30 minutes",
+            metric=cloudwatch.MathExpression(
+                expression="FILL(snapshots, 0)",
+                using_metrics={
+                    "snapshots": cloudwatch.Metric(
+                        namespace=METRIC_NAMESPACE,
+                        metric_name=METRIC_NAME,
+                        statistic="SampleCount",
+                    )
+                },
+                period=Duration.minutes(10),
+                label="Snapshots saved",
             ),
             threshold=1,
-            evaluation_periods=1,
+            # Three in a row, so one run that drifts into the next block can't trigger it.
+            evaluation_periods=3,
+            datapoints_to_alarm=3,
             comparison_operator=cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
             treat_missing_data=cloudwatch.TreatMissingData.BREACHING,
         )
