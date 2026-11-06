@@ -2,11 +2,14 @@
 
 from pathlib import Path
 
+import pyarrow as pa
 from aws_cdk import ArnFormat, Duration, RemovalPolicy, Stack
+from aws_cdk import aws_athena as athena
 from aws_cdk import aws_cloudwatch as cloudwatch
 from aws_cdk import aws_cloudwatch_actions as cloudwatch_actions
 from aws_cdk import aws_events as events
 from aws_cdk import aws_events_targets as targets
+from aws_cdk import aws_glue as glue
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
@@ -17,14 +20,38 @@ from constructs import Construct
 
 from twitch_trends.collector.handler import METRIC_NAME, METRIC_NAMESPACE
 from twitch_trends.common.storage import WATCHLIST_KEY
+from twitch_trends.compactor.handler import (
+    GAME_DAILY_SCHEMA,
+    SNAPSHOTS_SCHEMA,
+    STREAM_SNAPSHOTS_SCHEMA,
+)
 
 SRC_DIR = Path(__file__).parent.parent / "src"
+SQL_DIR = Path(__file__).parent.parent / "sql"
 CLIENT_ID_PARAM = "/twitch-trends/client-id"
 CLIENT_SECRET_PARAM = "/twitch-trends/client-secret"
 # AWS's free, public "AWS SDK for pandas" layer, which includes pyarrow for writing Parquet.
 # pyarrow is too big to bundle with the code comfortably. The version is pinned so a new
 # release can't change things without a deploy. Account 336392948345 belongs to AWS.
 PANDAS_LAYER = "arn:aws:lambda:{region}:336392948345:layer:AWSSDKPandas-Python312-Arm64:32"
+
+DATABASE_NAME = "twitch_trends"
+WORKGROUP_NAME = "twitch-trends"
+ATHENA_RESULTS_PREFIX = "athena-results/"
+# Athena charges per byte scanned ($5 per TB). A query that would scan more than this is
+# stopped, so one careless query costs at most half a cent.
+MAX_BYTES_PER_QUERY = 1024**3  # 1 GB
+# Partitions start here. Partition projection works out the days from this range, so new
+# days need no extra step to become queryable.
+FIRST_DAY = "2026-11-01"
+# Parquet column types, written the way Glue and Athena name them.
+GLUE_TYPES = {
+    pa.string(): "string",
+    pa.int32(): "int",
+    pa.float64(): "double",
+    pa.bool_(): "boolean",
+    pa.timestamp("ms", tz="UTC"): "timestamp",
+}
 
 
 class PipelineStack(Stack):
@@ -42,6 +69,10 @@ class PipelineStack(Stack):
             encryption=s3.BucketEncryption.S3_MANAGED,
             enforce_ssl=True,
             removal_policy=RemovalPolicy.RETAIN,
+            # Athena saves every query's results as a file. They're only needed briefly.
+            lifecycle_rules=[
+                s3.LifecycleRule(prefix=ATHENA_RESULTS_PREFIX, expiration=Duration.days(7))
+            ],
         )
 
         # Without an explicit log group, Lambda's logs are kept forever and slowly cost money.
@@ -289,3 +320,130 @@ class PipelineStack(Stack):
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
         compaction_failed.add_alarm_action(alert_action)
+
+        self._add_query_layer(bucket)
+
+    def _add_query_layer(self, bucket: s3.Bucket) -> None:
+        """Tables that let Athena query the files in S3 with SQL, plus a cost-capped workgroup.
+
+        A table here is only a description: where the files are and what columns they have.
+        The data stays in S3, and nothing runs or costs money until someone queries it.
+        """
+        database = glue.CfnDatabase(
+            self,
+            "Database",
+            catalog_id=self.account,
+            database_input=glue.CfnDatabase.DatabaseInputProperty(name=DATABASE_NAME),
+        )
+
+        def table(
+            name: str, prefix: str, columns: list[tuple[str, str]], storage: dict
+        ) -> glue.CfnTable:
+            location = f"s3://{bucket.bucket_name}/{prefix}"
+            created = glue.CfnTable(
+                self,
+                f"{name.title().replace('_', '')}Table",
+                catalog_id=self.account,
+                database_name=DATABASE_NAME,
+                table_input=glue.CfnTable.TableInputProperty(
+                    name=name,
+                    table_type="EXTERNAL_TABLE",
+                    partition_keys=[glue.CfnTable.ColumnProperty(name="dt", type="string")],
+                    # Partition projection: Athena works out which dt= folders exist from these
+                    # rules instead of a crawler scanning S3, and a WHERE on dt makes it read
+                    # only those days. That's what keeps queries cheap.
+                    parameters={
+                        "projection.enabled": "true",
+                        "projection.dt.type": "date",
+                        "projection.dt.format": "yyyy-MM-dd",
+                        "projection.dt.range": f"{FIRST_DAY},NOW",
+                        "projection.dt.interval": "1",
+                        "projection.dt.interval.unit": "DAYS",
+                        "storage.location.template": location + "dt=${dt}/",
+                    },
+                    storage_descriptor=glue.CfnTable.StorageDescriptorProperty(
+                        location=location,
+                        columns=[
+                            glue.CfnTable.ColumnProperty(name=col, type=col_type)
+                            for col, col_type in columns
+                        ],
+                        **storage,
+                    ),
+                ),
+            )
+            created.node.add_dependency(database)
+            return created
+
+        parquet = {
+            "input_format": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
+            "output_format": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
+            "serde_info": glue.CfnTable.SerdeInfoProperty(
+                serialization_library="org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+            ),
+        }
+        for name, schema in (
+            ("stream_snapshots", STREAM_SNAPSHOTS_SCHEMA),
+            ("game_daily", GAME_DAILY_SCHEMA),
+            ("snapshots", SNAPSHOTS_SCHEMA),
+        ):
+            columns = [(field.name, GLUE_TYPES[field.type]) for field in schema]
+            table(name, f"curated/{name}/", columns, parquet)
+
+        # The release sync's daily IGDB pull, so queries can join viewers to release dates.
+        table(
+            "release_games",
+            "ref/igdb/",
+            [
+                ("igdb_id", "bigint"),
+                ("name", "string"),
+                ("first_release_date", "date"),
+                ("game_type", "int"),
+                ("genres", "array<string>"),
+                ("hypes", "int"),
+                ("twitch_game_id", "string"),
+            ],
+            {
+                "input_format": "org.apache.hadoop.mapred.TextInputFormat",
+                "output_format": ("org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"),
+                "serde_info": glue.CfnTable.SerdeInfoProperty(
+                    serialization_library="org.openx.data.jsonserde.JsonSerDe"
+                ),
+            },
+        )
+
+        workgroup = athena.CfnWorkGroup(
+            self,
+            "Workgroup",
+            name=WORKGROUP_NAME,
+            description="Queries for the twitch-trends dataset, capped at 1 GB scanned each",
+            # Lets `cdk destroy` remove the workgroup even after queries have run in it.
+            recursive_delete_option=True,
+            work_group_configuration=athena.CfnWorkGroup.WorkGroupConfigurationProperty(
+                bytes_scanned_cutoff_per_query=MAX_BYTES_PER_QUERY,
+                # Stops a query from overriding the cap or the results location.
+                enforce_work_group_configuration=True,
+                engine_version=athena.CfnWorkGroup.EngineVersionProperty(
+                    selected_engine_version="Athena engine version 3"
+                ),
+                result_configuration=athena.CfnWorkGroup.ResultConfigurationProperty(
+                    output_location=f"s3://{bucket.bucket_name}/{ATHENA_RESULTS_PREFIX}",
+                    encryption_configuration=athena.CfnWorkGroup.EncryptionConfigurationProperty(
+                        encryption_option="SSE_S3"
+                    ),
+                ),
+            ),
+        )
+
+        # Saved queries show up in the Athena console, ready to run.
+        for path in sorted(SQL_DIR.glob("*.sql")):
+            query = athena.CfnNamedQuery(
+                self,
+                f"{path.stem.title().replace('_', '')}Query",
+                name=path.stem,
+                database=DATABASE_NAME,
+                work_group=WORKGROUP_NAME,
+                query_string=path.read_text(),
+                description=path.read_text().splitlines()[0].removeprefix("-- "),
+            )
+            query.node.add_dependency(workgroup)
+            query.node.add_dependency(database)

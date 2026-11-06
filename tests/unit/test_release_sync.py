@@ -73,7 +73,9 @@ def test_writes_daily_games_file_and_watchlist_of_matched_games(fake_twitch):
         "ref/igdb/dt=2026-11-06/games.json.gz",
         WATCHLIST_KEY,
     ]
-    games = json.loads(gzip.decompress(s3.puts[0]["Body"]))
+    lines = gzip.decompress(s3.puts[0]["Body"]).decode().splitlines()
+    games = [json.loads(line) for line in lines]  # one game per line, for Athena
+    assert len(games) == 3
     assert games[0] == {
         "igdb_id": 1,
         "name": "Game 1",

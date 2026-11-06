@@ -7,6 +7,7 @@ import pytest
 from aws_cdk.assertions import Match, Template
 
 from infra.pipeline_stack import PipelineStack
+from twitch_trends.compactor.handler import STREAM_SNAPSHOTS_SCHEMA
 
 
 @pytest.fixture(scope="module")
@@ -183,3 +184,59 @@ def test_alerts_go_to_the_given_email(template):
     template.has_resource_properties(
         "AWS::SNS::Subscription", {"Protocol": "email", "Endpoint": "alerts@example.com"}
     )
+
+
+def glue_table(template, name: str) -> dict:
+    tables = template.find_resources(
+        "AWS::Glue::Table", {"Properties": {"TableInput": {"Name": name}}}
+    )
+    assert len(tables) == 1
+    return next(iter(tables.values()))["Properties"]["TableInput"]
+
+
+@pytest.mark.parametrize("name", ["stream_snapshots", "game_daily", "snapshots", "release_games"])
+def test_tables_use_partition_projection_so_no_crawler_is_needed(template, name):
+    parameters = glue_table(template, name)["Parameters"]
+    assert parameters["projection.enabled"] == "true"
+    assert parameters["projection.dt.type"] == "date"
+    assert parameters["projection.dt.range"].endswith(",NOW")
+
+
+def test_table_columns_match_what_the_compactor_writes(template):
+    columns = glue_table(template, "stream_snapshots")["StorageDescriptor"]["Columns"]
+    assert [c["Name"] for c in columns] == STREAM_SNAPSHOTS_SCHEMA.names
+    assert {"Name": "viewer_count", "Type": "int"} in columns
+    assert {"Name": "snapshot_ts", "Type": "timestamp"} in columns
+
+
+def test_athena_queries_are_capped_at_1_gb_and_the_cap_is_enforced(template):
+    template.has_resource_properties(
+        "AWS::Athena::WorkGroup",
+        {
+            "WorkGroupConfiguration": Match.object_like(
+                {
+                    "BytesScannedCutoffPerQuery": 1024**3,
+                    "EnforceWorkGroupConfiguration": True,
+                }
+            )
+        },
+    )
+
+
+def test_athena_results_expire_after_a_week(template):
+    template.has_resource_properties(
+        "AWS::S3::Bucket",
+        {
+            "LifecycleConfiguration": {
+                "Rules": [
+                    Match.object_like(
+                        {"Prefix": "athena-results/", "ExpirationInDays": 7, "Status": "Enabled"}
+                    )
+                ]
+            }
+        },
+    )
+
+
+def test_saved_queries_are_published_for_every_sql_file(template):
+    template.resource_count_is("AWS::Athena::NamedQuery", 3)
