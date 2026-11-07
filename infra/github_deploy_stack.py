@@ -14,6 +14,10 @@ from aws_cdk import aws_iam as iam
 from constructs import Construct
 
 GITHUB_REPO = "AbbaAdam1/twitch-trends"
+# GitHub's tokens name the repo with fixed ID numbers as well as names (seen in CloudTrail on
+# the first deploy). Names can be reused after a rename or deletion; the IDs can't, so a new
+# repo with the same name still couldn't deploy.
+GITHUB_SUBJECT_REPO = "AbbaAdam1@90100486/twitch-trends@1440908310"
 DEPLOY_ROLE_NAME = "twitch-trends-github-deploy"
 # CDK's bootstrap roles all start with this. "hnb659fds" is CDK's default qualifier.
 CDK_ROLE_PREFIX = "cdk-hnb659fds-"
@@ -44,7 +48,7 @@ class GithubDeployStack(Stack):
                         # Only this repo's main branch. Pull requests, other branches and
                         # forks get a different "sub" value, so they can't deploy.
                         "token.actions.githubusercontent.com:sub": (
-                            f"repo:{GITHUB_REPO}:ref:refs/heads/main"
+                            f"repo:{GITHUB_SUBJECT_REPO}:ref:refs/heads/main"
                         ),
                     }
                 },
