@@ -30,7 +30,7 @@ def test_only_main_branch_of_this_repo_can_assume_the_role(template):
     assert len(trust) == 1
     conditions = trust[0]["Condition"]["StringEquals"]
     assert conditions["token.actions.githubusercontent.com:sub"] == (
-        "repo:AbbaAdam1/twitch-trends:ref:refs/heads/main"
+        "repo:AbbaAdam1@90100486/twitch-trends@1440908310:ref:refs/heads/main"
     )
     assert conditions["token.actions.githubusercontent.com:aud"] == "sts.amazonaws.com"
     assert role["Properties"]["MaxSessionDuration"] == 3600
