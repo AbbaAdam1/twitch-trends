@@ -2,6 +2,7 @@
 
 import aws_cdk as cdk
 
+from infra.github_deploy_stack import GithubDeployStack
 from infra.pipeline_stack import PipelineStack
 
 app = cdk.App()
@@ -13,5 +14,7 @@ if not alert_email:
     raise ValueError("Pass your alert address: cdk deploy -c alert_email=you@example.com")
 
 PipelineStack(app, "TwitchTrendsPipeline", alert_email=alert_email)
+# Deployed by hand once: cdk deploy TwitchTrendsGithubDeploy. GitHub only deploys the pipeline.
+GithubDeployStack(app, "TwitchTrendsGithubDeploy")
 
 app.synth()
