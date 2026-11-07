@@ -1,7 +1,7 @@
--- Watchlist games by average viewers yesterday, with release dates from that day's IGDB pull.
--- Change the date on the first line of the WITH block to look at another day.
+-- Watchlist games by average viewers on the latest compacted day, with release dates from
+-- that day's IGDB pull. To pick a day, replace the first SELECT with: SELECT '2026-11-06' AS dt
 WITH day AS (
-    SELECT date_format(current_date - INTERVAL '1' DAY, '%Y-%m-%d') AS dt
+    SELECT max(dt) AS dt FROM game_daily
 ),
 releases AS (
     SELECT twitch_game_id, name, first_release_date, genres

@@ -23,6 +23,8 @@ aws sso login --profile twitch-trends
 cdk deploy -c alert_email=you@example.com --profile twitch-trends
 ```
 
+Merging to `main` deploys automatically: after the tests pass, GitHub Actions signs in to AWS through OIDC (no AWS keys are stored in GitHub) and runs `cdk deploy`. The role it uses trusts only this repo's `main` branch and can only use CDK's own deploy roles. It lives in a separate stack, deployed once by hand with `cdk deploy TwitchTrendsGithubDeploy`. The workflow reads two repository secrets: `AWS_DEPLOY_ROLE_ARN` and `ALERT_EMAIL`.
+
 To compact past days, for example after a fix, run the deployed compactor over a date range:
 
 ```

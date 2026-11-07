@@ -18,3 +18,34 @@ jobs:
       - run: ruff format --check .
       - run: pytest
       - run: npx --yes aws-cdk@2 synth -c alert_email=ci@example.com
+
+  # Runs only for pushes to main (a merged PR), and only after the tests pass.
+  deploy:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # One deploy at a time. A second merge waits instead of racing the first.
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    permissions:
+      id-token: write # lets the job ask GitHub for the signed token AWS checks
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      # Swaps GitHub's token for AWS credentials that expire within the hour. No AWS keys
+      # are stored in GitHub. The role only trusts this repo's main branch.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+      # Only the pipeline. The GitHub access stack is deployed by hand, so this job can't
+      # change its own permissions.
+      - run: >-
+          npx --yes aws-cdk@2 deploy TwitchTrendsPipeline
+          --require-approval never
+          -c alert_email="${{ secrets.ALERT_EMAIL }}"
